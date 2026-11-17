@@ -16,6 +16,7 @@ create table if not exists public.departments (
 create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   display_name text not null default '',
+  email text not null default '',
   role text not null default 'viewer' check (role in ('owner','admin','department_head','editor','viewer')),
   department_id uuid references public.departments(id) on delete set null,
   active boolean not null default true,
@@ -82,8 +83,8 @@ for each row execute function public.set_updated_at();
 create or replace function public.handle_new_user()
 returns trigger language plpgsql security definer set search_path = public as $$
 begin
-  insert into public.profiles(id, display_name, role, active)
-  values (new.id, coalesce(new.raw_user_meta_data->>'name',''), 'viewer', true)
+  insert into public.profiles(id, display_name, email, role, active)
+  values (new.id, coalesce(new.raw_user_meta_data->>'name',''), coalesce(new.email,''), 'viewer', true)
   on conflict(id) do nothing;
   return new;
 end; $$;
@@ -118,7 +119,10 @@ create policy "Admins manage departments" on public.departments for all using (p
 drop policy if exists "Users read own profile or admins read all" on public.profiles;
 create policy "Users read own profile or admins read all" on public.profiles for select using (id = auth.uid() or public.my_role() in ('owner','admin'));
 drop policy if exists "Owners and admins manage profiles" on public.profiles;
-create policy "Owners and admins manage profiles" on public.profiles for all using (public.my_role() in ('owner','admin')) with check (public.my_role() in ('owner','admin'));
+drop policy if exists "Owners and admins update profiles" on public.profiles;
+create policy "Owners and admins update profiles" on public.profiles for update
+using (public.my_role() = 'owner' or (public.my_role() = 'admin' and role <> 'owner'))
+with check (public.my_role() = 'owner' or (public.my_role() = 'admin' and role <> 'owner'));
 
 drop policy if exists "Public can read published SOP sections" on public.sop_sections;
 create policy "Public can read published SOP sections" on public.sop_sections for select using (published = true or public.can_manage_department(department_id));
@@ -135,21 +139,50 @@ create policy "Admins read audit log" on public.audit_log for select using (publ
 revoke insert, update, delete on public.audit_log from anon, authenticated;
 
 create or replace function public.write_sop_audit()
-returns trigger language plpgsql security definer set search_path = public as $$
-declare dept uuid; rec text; act text;
+returns trigger language plpgsql security definer set search_path = public as $
+declare dept uuid; rec text; act text; secno text; sectitle text;
 begin
-  if tg_op = 'DELETE' then dept := old.department_id; rec := old.id::text; act := 'DELETE'; 
-  elsif tg_op = 'INSERT' then dept := new.department_id; rec := new.id::text; act := 'INSERT';
-  else dept := new.department_id; rec := new.id::text; act := 'UPDATE'; end if;
+  if tg_op = 'DELETE' then
+    dept := old.department_id; rec := old.id::text; act := 'DELETE';
+    secno := old.section_number; sectitle := old.title;
+  else
+    dept := new.department_id; rec := new.id::text;
+    act := case when tg_op = 'INSERT' then 'INSERT' else 'UPDATE' end;
+    secno := new.section_number; sectitle := new.title;
+  end if;
   insert into public.audit_log(actor_id, action, table_name, record_id, department_id, summary)
   values(auth.uid(), act, 'sop_sections', rec, dept,
-    jsonb_build_object('section_number', coalesce(new.section_number,old.section_number),
-                       'title', coalesce(new.title,old.title)));
+    jsonb_build_object('section_number', secno, 'title', sectitle));
   if tg_op = 'DELETE' then return old; else return new; end if;
-end; $$;
+end; $;
 drop trigger if exists sop_sections_audit on public.sop_sections;
 create trigger sop_sections_audit after insert or update or delete on public.sop_sections
 for each row execute function public.write_sop_audit();
 
 -- After creating your own account in the panel, promote that account once:
 -- update public.profiles set role='owner', display_name='Your Name' where id='AUTH_USER_UUID';
+
+-- Record department and staff-permission changes in the audit log as well.
+create or replace function public.write_admin_audit()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare rec text; dept uuid; act text; details jsonb;
+begin
+  if tg_op = 'DELETE' then
+    rec := old.id::text; act := 'DELETE';
+    if tg_table_name = 'profiles' then dept := old.department_id; details := jsonb_build_object('email',old.email,'role',old.role);
+    else details := jsonb_build_object('name',old.name,'slug',old.slug); end if;
+  else
+    rec := new.id::text; act := case when tg_op='INSERT' then 'INSERT' else 'UPDATE' end;
+    if tg_table_name = 'profiles' then dept := new.department_id; details := jsonb_build_object('email',new.email,'role',new.role);
+    else details := jsonb_build_object('name',new.name,'slug',new.slug); end if;
+  end if;
+  insert into public.audit_log(actor_id,action,table_name,record_id,department_id,summary)
+  values(auth.uid(),act,tg_table_name,rec,dept,details);
+  if tg_op='DELETE' then return old; else return new; end if;
+end; $$;
+drop trigger if exists departments_audit on public.departments;
+create trigger departments_audit after insert or update or delete on public.departments
+for each row execute function public.write_admin_audit();
+drop trigger if exists profiles_audit on public.profiles;
+create trigger profiles_audit after update on public.profiles
+for each row execute function public.write_admin_audit();
