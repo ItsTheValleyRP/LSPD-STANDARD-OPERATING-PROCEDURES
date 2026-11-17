@@ -154,7 +154,7 @@ begin
   values(auth.uid(), act, 'sop_sections', rec, dept,
     jsonb_build_object('section_number', secno, 'title', sectitle));
   if tg_op = 'DELETE' then return old; else return new; end if;
-end; $;
+end; $$;
 drop trigger if exists sop_sections_audit on public.sop_sections;
 create trigger sop_sections_audit after insert or update or delete on public.sop_sections
 for each row execute function public.write_sop_audit();
