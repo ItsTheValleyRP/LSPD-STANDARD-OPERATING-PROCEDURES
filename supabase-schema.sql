@@ -139,7 +139,7 @@ create policy "Admins read audit log" on public.audit_log for select using (publ
 revoke insert, update, delete on public.audit_log from anon, authenticated;
 
 create or replace function public.write_sop_audit()
-returns trigger language plpgsql security definer set search_path = public as $
+returns trigger language plpgsql security definer set search_path = public as $$
 declare dept uuid; rec text; act text; secno text; sectitle text;
 begin
   if tg_op = 'DELETE' then
