@@ -48,7 +48,7 @@ begin
   end if;
   update public.profiles
   set access_status = decision,
-      active = (decision = 'approved')
+      active = true
   where id = target_user;
   if not found then
     raise exception 'Account not found';
